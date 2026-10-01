@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Sabines Gassirunde</title>
+<style>
+  :root {
+    --bg: #2f4a2a;
+    --panel: rgba(255, 252, 240, 0.95);
+    --ink: #2b2b2b;
+    --accent: #e0662f;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    font-family: "Trebuchet MS", system-ui, sans-serif;
+    color: var(--ink);
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #wrap {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    display: block;
+    background: #7fb069;
+    box-shadow: 0 0 40px rgba(0,0,0,0.4);
+    image-rendering: auto;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+  }
+  .card {
+    pointer-events: auto;
+    background: var(--panel);
+    border-radius: 18px;
+    padding: 24px 28px;
+    max-width: min(380px, calc(100vw - 32px));
+    text-align: center;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+  }
+  .card h1 { margin: 0 0 8px; font-size: 28px; color: var(--accent); }
+  .card p { margin: 8px 0; line-height: 1.4; }
+  .card .small { font-size: 14px; opacity: 0.8; }
+  .card button {
+    margin-top: 14px;
+    font: inherit;
+    font-size: 20px;
+    font-weight: bold;
+    color: white;
+    background: var(--accent);
+    border: none;
+    border-radius: 12px;
+    padding: 12px 28px;
+    cursor: pointer;
+  }
+  .card button:hover { filter: brightness(1.08); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+
+  <div class="overlay" id="startScreen">
+    <div class="card">
+      <h1>Sabines Gassirunde</h1>
+      <p>Sabine geht mit ihrem Hund <b>Bello</b> im Park spazieren.</p>
+      <p>Weiche den anderen Hunden aus – weder Sabine noch Bello dürfen angerempelt werden!</p>
+      <p>Sammle 🦴 Leckerlis für Extrapunkte. ❤️ bringen ein Leben zurück.</p>
+      <p class="small">Steuerung: Pfeiltasten / WASD oder mit dem Finger ziehen.<br>P = Pause</p>
+      <button id="startBtn">Los geht's!</button>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="overScreen">
+    <div class="card">
+      <h1>Gassi vorbei!</h1>
+      <p id="overText"></p>
+      <p id="bestText" class="small"></p>
+      <button id="againBtn">Nochmal</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------- Setup ----------
+  const W = 480, H = 800;           // logische Spielfeldgröße
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  let scale = 1;
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+    canvas.style.width = W * scale + "px";
+    canvas.style.height = H * scale + "px";
+    canvas.width = Math.round(W * scale * dpr);
+    canvas.height = Math.round(H * scale * dpr);
+    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  const PATH_L = 70, PATH_R = W - 70;   // Weg-Grenzen
+  const BEST_KEY = "sabine-gassi-best";
+
+  function loadBest() {
+    try { return Number(localStorage.getItem(BEST_KEY)) || 0; } catch { return 0; }
+  }
+  function saveBest(v) {
+    try { localStorage.setItem(BEST_KEY, String(v)); } catch {}
+  }
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const dist2 = (ax, ay, bx, by) => (ax - bx) ** 2 + (ay - by) ** 2;
+
+  // ---------- Eingabe ----------
+  const keys = {};
+  window.addEventListener("keydown", e => {
+    keys[e.key.toLowerCase()] = true;
+    if (["arrowup","arrowdown","arrowleft","arrowright"," "].includes(e.key.toLowerCase())) e.preventDefault();
+    if (e.key.toLowerCase() === "p" && state === "play") paused = !paused;
+  });
+  window.addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+
+  let touch = null; // {x,y} Zielposition in Spielkoordinaten
+  function toGame(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale };
+  }
+  canvas.addEventListener("pointerdown", e => { touch = toGame(e); canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener("pointermove", e => { if (touch) touch = toGame(e); });
+  const endTouch = () => { touch = null; };
+  canvas.addEventListener("pointerup", endTouch);
+  canvas.addEventListener("pointercancel", endTouch);
+
+  // ---------- Spielzustand ----------
+  let state = "start";
+  let paused = false;
+  let sabine, bello, others, items, particles, floaters;
+  let scroll, speed, score, distance, lives, invuln, spawnTimer, itemTimer, time, shake;
+  let best = loadBest();
+
+  const DOG_BREEDS = [
+    { name: "Dackel",   body: "#8b4513", ear: "#5c2d0c", w: 34, h: 16, speed: 1.0 },
+    { name: "Pudel",    body: "#f4f1ea", ear: "#ddd6c8", w: 26, h: 22, speed: 0.9 },
+    { name: "Dalmatiner", body: "#ffffff", ear: "#222",  w: 36, h: 20, speed: 1.2, spots: true },
+    { name: "Mops",     body: "#d8b98a", ear: "#3a3026", w: 24, h: 20, speed: 0.8 },
+    { name: "Schäferhund", body: "#a0692e", ear: "#2b1d10", w: 40, h: 22, speed: 1.3, saddle: true },
+    { name: "Husky",    body: "#9aa3ad", ear: "#4d545c", w: 36, h: 22, speed: 1.25 },
+  ];
+
+  function reset() {
+    sabine = { x: W / 2, y: H - 170, vx: 0, vy: 0, r: 16, step: 0 };
+    bello = { x: W / 2, y: H - 110, vx: 0, vy: 0, r: 13, step: 0, dir: -Math.PI / 2 };
+    others = [];
+    items = [];
+    particles = [];
+    floaters = [];
+    scroll = 0;
+    speed = 140;          // Pixel/s, mit denen sich der Weg bewegt
+    score = 0;
+    distance = 0;
+    lives = 3;
+    invuln = 0;
+    spawnTimer = 1.2;
+    itemTimer = 2.5;
+    time = 0;
+    shake = 0;
+    paused = false;
+  }
+
+  // ---------- Spawning ----------
+  function spawnDog() {
+    const breed = DOG_BREEDS[Math.floor(Math.random() * DOG_BREEDS.length)];
+    const level = Math.min(time / 60, 1.5);
+    const kind = Math.random();
+    let dog = {
+      breed,
+      x: rand(PATH_L + 20, PATH_R - 20),
+      y: -40,
+      vx: 0,
+      vy: rand(30, 70) * breed.speed * (1 + level * 0.6),
+      step: rand(0, 6),
+      mode: "walk",
+      t: 0,
+      barked: false,
+      owner: Math.random() < 0.45,  // manche Hunde haben ein Herrchen dabei
+    };
+    if (kind < 0.25 + level * 0.15) {
+      // Quer-Läufer: kommt von der Seite über die Wiese
+      const fromLeft = Math.random() < 0.5;
+      dog.x = fromLeft ? -30 : W + 30;
+      dog.y = rand(60, H * 0.5);
+      dog.vx = (fromLeft ? 1 : -1) * rand(90, 150) * breed.speed;
+      dog.vy = rand(-10, 20);
+      dog.mode = "cross";
+      dog.owner = false;
+    } else if (kind < 0.45 + level * 0.25) {
+      // Schnüffler: schlängelt sich den Weg entlang
+      dog.mode = "zigzag";
+      dog.amp = rand(40, 90);
+      dog.baseX = dog.x;
+      dog.freq = rand(1.5, 3);
+    } else if (kind < 0.55 + level * 0.3) {
+      // Neugieriger: läuft gezielt auf Bello zu
+      dog.mode = "chase";
+      dog.owner = false;
+    }
+    others.push(dog);
+  }
+
+  function spawnItem() {
+    const heart = lives < 3 && Math.random() < 0.15;
+    items.push({
+      type: heart ? "heart" : "treat",
+      x: rand(PATH_L + 20, PATH_R - 20),
+      y: -20,
+      bob: rand(0, 6),
+    });
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    time += dt;
+    speed = 140 + Math.min(time * 2.2, 160);
+    scroll += speed * dt;
+    distance += speed * dt;
+    score += speed * dt * 0.05;
+
+    // Sabine steuern
+    let ax = 0, ay = 0;
+    if (keys["arrowleft"] || keys["a"]) ax -= 1;
+    if (keys["arrowright"] || keys["d"]) ax += 1;
+    if (keys["arrowup"] || keys["w"]) ay -= 1;
+    if (keys["arrowdown"] || keys["s"]) ay += 1;
+    const maxV = 260;
+    if (touch) {
+      const dx = touch.x - sabine.x, dy = (touch.y - 40) - sabine.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 4) { ax = dx / Math.max(d, 60); ay = dy / Math.max(d, 60); }
+    } else if (ax && ay) { ax *= 0.7071; ay *= 0.7071; }
+    sabine.vx += (ax * maxV - sabine.vx) * Math.min(1, dt * 12);
+    sabine.vy += (ay * maxV - sabine.vy) * Math.min(1, dt * 12);
+    sabine.x = clamp(sabine.x + sabine.vx * dt, PATH_L - 30, PATH_R + 30);
+    sabine.y = clamp(sabine.y + sabine.vy * dt, 140, H - 60);
+    sabine.step += dt * (6 + Math.hypot(sabine.vx, sabine.vy) / 40);
+
+    // Bello folgt an der Leine (Feder + max. Leinenlänge)
+    const leash = 62;
+    const tx = sabine.x + Math.sin(time * 1.3) * 22;
+    const ty = sabine.y + 48;
+    bello.vx += (tx - bello.x) * dt * 9;
+    bello.vy += (ty - bello.y) * dt * 9;
+    bello.vx *= Math.pow(0.04, dt);
+    bello.vy *= Math.pow(0.04, dt);
+    bello.x += bello.vx * dt;
+    bello.y += bello.vy * dt;
+    let ldx = bello.x - sabine.x, ldy = bello.y - sabine.y;
+    let ld = Math.hypot(ldx, ldy);
+    if (ld > leash) {
+      bello.x = sabine.x + ldx / ld * leash;
+      bello.y = sabine.y + ldy / ld * leash;
+    }
+    if (Math.hypot(bello.vx, bello.vy) > 15) bello.dir = Math.atan2(bello.vy, bello.vx);
+    else bello.dir += (-Math.PI / 2 - bello.dir) * dt * 3;
+    bello.step += dt * (8 + Math.hypot(bello.vx, bello.vy) / 30);
+
+    // Gegner
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      spawnDog();
+      const minGap = Math.max(0.45, 1.3 - time * 0.012);
+      spawnTimer = rand(minGap, minGap * 1.8);
+    }
+    for (const d of others) {
+      d.t += dt;
+      d.step += dt * 10;
+      d.y += speed * dt;               // Weg scrollt mit
+      if (d.mode === "zigzag") {
+        d.y += d.vy * dt;
+        d.x = clamp(d.baseX + Math.sin(d.t * d.freq) * d.amp, PATH_L, PATH_R);
+      } else if (d.mode === "chase") {
+        const dx = bello.x - d.x;
+        d.vx += Math.sign(dx) * 140 * dt;
+        d.vx = clamp(d.vx, -110, 110);
+        d.x += d.vx * dt;
+        d.y += d.vy * dt;
+      } else {
+        d.x += d.vx * dt;
+        d.y += d.vy * dt;
+      }
+      // Bellen, wenn nah
+      if (!d.barked && dist2(d.x, d.y, bello.x, bello.y) < 160 * 160) {
+        d.barked = true;
+        floaters.push({ x: d.x, y: d.y - 24, text: "Wuff!", life: 0.9, color: "#fff" });
+      }
+    }
+    others = others.filter(d => d.y < H + 80 && d.x > -80 && d.x < W + 80);
+
+    // Items
+    itemTimer -= dt;
+    if (itemTimer <= 0) { spawnItem(); itemTimer = rand(1.5, 3.2); }
+    for (const it of items) { it.y += speed * dt; it.bob += dt * 4; }
+    items = items.filter(it => {
+      if (it.y > H + 30) return false;
+      const hitS = dist2(it.x, it.y, sabine.x, sabine.y) < 30 * 30;
+      const hitB = dist2(it.x, it.y, bello.x, bello.y) < 28 * 28;
+      if (hitS || hitB) {
+        if (it.type === "treat") {
+          score += 50;
+          floaters.push({ x: it.x, y: it.y, text: "+50", life: 0.9, color: "#ffe066" });
+          burst(it.x, it.y, "#ffe066", 10);
+        } else {
+          lives = Math.min(3, lives + 1);
+          floaters.push({ x: it.x, y: it.y, text: "+1 ❤", life: 1, color: "#ff6b81" });
+          burst(it.x, it.y, "#ff6b81", 14);
+        }
+        return false;
+      }
+      return true;
+    });
+
+    // Kollisionen
+    if (invuln > 0) invuln -= dt;
+    else {
+      for (const d of others) {
+        const dr = Math.max(d.breed.w, d.breed.h) * 0.42;
+        const hitS = dist2(d.x, d.y, sabine.x, sabine.y) < (dr + sabine.r) ** 2;
+        const hitB = dist2(d.x, d.y, bello.x, bello.y) < (dr + bello.r) ** 2;
+        if (hitS || hitB) {
+          lives--;
+          invuln = 1.6;
+          shake = 0.35;
+          const hx = hitB ? bello.x : sabine.x, hy = hitB ? bello.y : sabine.y;
+          burst(hx, hy, "#ffffff", 16);
+          floaters.push({ x: hx, y: hy - 30, text: hitB ? "Grrr!" : "Autsch!", life: 1, color: "#ff4d4d" });
+          // Den Hund wegschubsen
+          d.vx = (d.x < hx ? -1 : 1) * 220;
+          d.vy = -60;
+          d.mode = "cross";
+          if (lives <= 0) gameOver();
+          break;
+        }
+      }
+    }
+
+    // Partikel & Texte
+    for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt; p.life -= dt; }
+    particles = particles.filter(p => p.life > 0);
+    for (const f of floaters) { f.y -= 40 * dt; f.life -= dt; }
+    floaters = floaters.filter(f => f.life > 0);
+    if (shake > 0) shake -= dt;
+  }
+
+  function burst(x, y, color, n) {
+    for (let i = 0; i < n; i++) {
+      const a = rand(0, Math.PI * 2), s = rand(60, 200);
+      particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 80, life: rand(0.4, 0.8), color });
+    }
+  }
+
+  // ---------- Zeichnen ----------
+  function drawPark() {
+    // Wiese
+    ctx.fillStyle = "#7fb069";
+    ctx.fillRect(0, 0, W, H);
+
+    // Grasbüschel & Blumen (scrollend, deterministisch)
+    const tile = 80;
+    const off = scroll % tile;
+    const baseRow = Math.floor(scroll / tile);
+    for (let row = -1; row < H / tile + 1; row++) {
+      const worldRow = baseRow - row;
+      const y = row * tile + off;
+      for (let side = 0; side < 2; side++) {
+        const seed = Math.abs(Math.sin(worldRow * 12.9898 + side * 78.233) * 43758.5453) % 1;
+        const x = side === 0 ? 10 + seed * 40 : W - 50 + seed * 40;
+        ctx.fillStyle = "#6a9a55";
+        ctx.beginPath();
+        ctx.ellipse(x, y + 20, 10, 5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        if (seed > 0.55) {
+          ctx.fillStyle = seed > 0.8 ? "#ffd166" : "#f78fb3";
+          for (let k = 0; k < 5; k++) {
+            const a = k / 5 * Math.PI * 2;
+            ctx.beginPath();
+            ctx.arc(x + 14 + Math.cos(a) * 4, y + 50 + Math.sin(a) * 4, 3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.fillStyle = "#fff6c2";
+          ctx.beginPath(); ctx.arc(x + 14, y + 50, 2.5, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    }
+
+    // Weg
+    ctx.fillStyle = "#d9c49a";
+    ctx.fillRect(PATH_L, 0, PATH_R - PATH_L, H);
+    ctx.fillStyle = "#c9b183";
+    ctx.fillRect(PATH_L, 0, 5, H);
+    ctx.fillRect(PATH_R - 5, 0, 5, H);
+    // Kiesel
+    const ktile = 40;
+    const koff = scroll % ktile;
+    const kbase = Math.floor(scroll / ktile);
+    ctx.fillStyle = "#bfa677";
+    for (let row = -1; row < H / ktile + 1; row++) {
+      const wr = kbase - row;
+      for (let k = 0; k < 3; k++) {
+        const s = Math.abs(Math.sin(wr * 3.7 + k * 19.1) * 9631.7) % 1;
+        const x = PATH_L + 15 + s * (PATH_R - PATH_L - 30);
+        ctx.beginPath();
+        ctx.ellipse(x, row * ktile + koff + k * 12, 3, 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Bäume am Rand (große Kronen, langsamer Parallax nicht nötig)
+    const ttile = 220;
+    const toff = scroll % ttile;
+    const tbase = Math.floor(scroll / ttile);
+    for (let row = -1; row < H / ttile + 2; row++) {
+      const wr = tbase - row;
+      const s = Math.abs(Math.sin(wr * 7.31) * 5413.1) % 1;
+      const left = s < 0.5;
+      const x = left ? 18 + s * 20 : W - 18 - (s - 0.5) * 40;
+      const y = row * ttile + toff + 40;
+      ctx.fillStyle = "rgba(0,0,0,0.15)";
+      ctx.beginPath(); ctx.ellipse(x + 8, y + 10, 40, 30, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#3f7a3a";
+      ctx.beginPath(); ctx.arc(x, y, 36, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#4f8f45";
+      ctx.beginPath(); ctx.arc(x - 10, y - 8, 22, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function drawDogShape(x, y, dir, breed, step, alpha = 1) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+    ctx.rotate(dir + Math.PI / 2); // Kopf zeigt in "dir"
+    const w = breed.h, l = breed.w;  // Breite quer, Länge entlang Laufrichtung
+    // Schatten
+    ctx.fillStyle = "rgba(0,0,0,0.2)";
+    ctx.beginPath(); ctx.ellipse(3, 4, w * 0.6, l * 0.55, 0, 0, Math.PI * 2); ctx.fill();
+    // Beine
+    const leg = Math.sin(step) * 4;
+    ctx.fillStyle = breed.ear;
+    for (const [lx, ly, s] of [[-w*0.45, -l*0.25, 1], [w*0.45, -l*0.25, -1], [-w*0.45, l*0.3, -1], [w*0.45, l*0.3, 1]]) {
+      ctx.beginPath(); ctx.ellipse(lx, ly + leg * s, 3, 4, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    // Schwanz
+    ctx.strokeStyle = breed.body === "#ffffff" || breed.body === "#f4f1ea" ? "#bbb" : breed.body;
+    ctx.lineWidth = 4; ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(0, l * 0.45);
+    ctx.quadraticCurveTo(Math.sin(step * 1.6) * 10, l * 0.65, Math.sin(step * 1.6) * 6, l * 0.8);
+    ctx.stroke();
+    // Körper
+    ctx.fillStyle = breed.body;
+    ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(0, 0, w * 0.5, l * 0.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    if (breed.saddle) {
+      ctx.fillStyle = "#2b1d10";
+      ctx.beginPath(); ctx.ellipse(0, 2, w * 0.35, l * 0.3, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    if (breed.spots) {
+      ctx.fillStyle = "#222";
+      for (const [sx, sy] of [[-4, -5], [5, 3], [-3, 8], [4, -10], [0, 0]]) {
+        ctx.beginPath(); ctx.arc(sx, sy, 2.2, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    // Kopf
+    const hy = -l * 0.5 - 4;
+    ctx.fillStyle = breed.body;
+    ctx.beginPath(); ctx.arc(0, hy, w * 0.42, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    // Ohren
+    ctx.fillStyle = breed.ear;
+    ctx.beginPath(); ctx.ellipse(-w * 0.38, hy + 2, 3.5, 6, 0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(w * 0.38, hy + 2, 3.5, 6, -0.4, 0, Math.PI * 2); ctx.fill();
+    // Schnauze
+    ctx.fillStyle = "#222";
+    ctx.beginPath(); ctx.arc(0, hy - w * 0.4, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawOwner(d) {
+    // Herrchen/Frauchen läuft neben dem Hund, mit Leine
+    const ox = d.x + (d.x < W / 2 ? 34 : -34), oy = d.y + 26;
+    ctx.strokeStyle = "#444"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(d.x, d.y - 4); ctx.stroke();
+    drawPerson(ox, oy, "#5b7fbd", "#5a3d2b", d.step * 0.6, false, Math.PI / 2);
+  }
+
+  function drawPerson(x, y, shirt, hair, step, isSabine, facing = -Math.PI / 2) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(facing + Math.PI / 2);
+    // Schatten
+    ctx.fillStyle = "rgba(0,0,0,0.2)";
+    ctx.beginPath(); ctx.ellipse(4, 5, 20, 14, 0, 0, Math.PI * 2); ctx.fill();
+    // Füße
+    const f = Math.sin(step) * 6;
+    ctx.fillStyle = "#333";
+    ctx.beginPath(); ctx.ellipse(-6, -f, 4, 6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(6, f, 4, 6, 0, 0, Math.PI * 2); ctx.fill();
+    // Schultern / Körper
+    ctx.fillStyle = shirt;
+    ctx.strokeStyle = "rgba(0,0,0,0.3)"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(0, 2, 17, 10, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    // Arme
+    ctx.fillStyle = "#f2c9a0";
+    ctx.beginPath(); ctx.arc(-17, 2 + f * 0.5, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(17, 2 - f * 0.5, 4, 0, Math.PI * 2); ctx.fill();
+    // Kopf
+    ctx.fillStyle = "#f2c9a0";
+    ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI * 2); ctx.fill();
+    // Haare (von oben)
+    ctx.fillStyle = hair;
+    ctx.beginPath(); ctx.arc(0, 2, 9.5, Math.PI * 0.05, Math.PI * 0.95, true); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 1, 8.5, 0, Math.PI * 2); ctx.fill();
+    if (isSabine) {
+      // Pferdeschwanz, der beim Gehen schwingt
+      ctx.beginPath();
+      ctx.ellipse(Math.sin(step) * 2.5, 13, 4, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#e0662f";
+      ctx.beginPath(); ctx.arc(0, 8.5, 2.5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawItems() {
+    for (const it of items) {
+      const y = it.y + Math.sin(it.bob) * 3;
+      ctx.save();
+      ctx.translate(it.x, y);
+      if (it.type === "treat") {
+        ctx.rotate(0.5);
+        ctx.fillStyle = "#f3e2b3";
+        ctx.strokeStyle = "#a88a4c"; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.roundRect(-10, -3.5, 20, 7, 3);
+        for (const [cx, cy] of [[-10, -4], [-10, 4], [10, -4], [10, 4]]) {
+          ctx.moveTo(cx + 4.5, cy); ctx.arc(cx, cy, 4.5, 0, Math.PI * 2);
+        }
+        ctx.fill(); ctx.stroke();
+      } else {
+        ctx.fillStyle = "#ff4d6d";
+        ctx.beginPath();
+        ctx.moveTo(0, 8);
+        ctx.bezierCurveTo(-14, -2, -8, -14, 0, -6);
+        ctx.bezierCurveTo(8, -14, 14, -2, 0, 8);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  function drawHUD() {
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(0, 0, W, 48);
+    ctx.font = "bold 20px Trebuchet MS, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#fff";
+    ctx.fillText("Punkte: " + Math.floor(score), 14, 24);
+    ctx.textAlign = "center";
+    ctx.font = "15px Trebuchet MS, sans-serif";
+    ctx.fillText(Math.floor(distance / 50) + " m", W / 2 + 20, 24);
+    ctx.textAlign = "right";
+    ctx.font = "22px sans-serif";
+    let hearts = "";
+    for (let i = 0; i < 3; i++) hearts += i < lives ? "❤️" : "🤍";
+    ctx.fillText(hearts, W - 12, 26);
+  }
+
+  function draw() {
+    ctx.save();
+    if (shake > 0) ctx.translate(rand(-5, 5) * shake * 3, rand(-5, 5) * shake * 3);
+    drawPark();
+    drawItems();
+
+    for (const d of others) if (d.owner && d.mode !== "cross") drawOwner(d);
+    for (const d of others) {
+      const dir = Math.atan2(d.vy + speed * 0.3, d.vx + (d.mode === "zigzag" ? Math.cos(d.t * d.freq) * d.amp * d.freq : 0));
+      drawDogShape(d.x, d.y, dir, d.breed, d.step);
+    }
+
+    if (state !== "start" || true) {
+      const blink = invuln > 0 && Math.floor(invuln * 10) % 2 === 0;
+      // Leine
+      ctx.strokeStyle = "#c0392b";
+      ctx.lineWidth = 2;
+      const hx = sabine.x + 14, hy = sabine.y + 4;
+      const midx = (hx + bello.x) / 2, midy = (hy + bello.y) / 2;
+      const slack = Math.max(0, 62 - Math.hypot(bello.x - hx, bello.y - hy)) * 0.6;
+      ctx.beginPath();
+      ctx.moveTo(hx, hy);
+      ctx.quadraticCurveTo(midx + slack, midy + slack * 0.5, bello.x, bello.y);
+      ctx.stroke();
+
+      const belloBreed = { body: "#c98b3c", ear: "#7a4a17", w: 32, h: 20 };
+      drawDogShape(bello.x, bello.y, bello.dir, belloBreed, bello.step, blink ? 0.35 : 1);
+      // Halsband
+      ctx.save();
+      ctx.globalAlpha = blink ? 0.35 : 1;
+      ctx.translate(bello.x, bello.y);
+      ctx.rotate(bello.dir + Math.PI / 2);
+      ctx.fillStyle = "#c0392b";
+      ctx.fillRect(-7, -16 - 3, 14, 3);
+      ctx.restore();
+
+      ctx.save();
+      ctx.globalAlpha = blink ? 0.35 : 1;
+      drawPerson(sabine.x, sabine.y, "#e0662f", "#c8913a", sabine.step, true);
+      ctx.restore();
+    }
+
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(0, p.life * 1.5);
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "bold 18px Trebuchet MS, sans-serif";
+    for (const f of floaters) {
+      ctx.globalAlpha = Math.min(1, f.life * 2);
+      ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,0.6)";
+      ctx.strokeText(f.text, f.x, f.y);
+      ctx.fillStyle = f.color;
+      ctx.fillText(f.text, f.x, f.y);
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    if (state === "play") drawHUD();
+    if (paused) {
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 36px Trebuchet MS, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Pause", W / 2, H / 2);
+    }
+  }
+
+  // ---------- Ablauf ----------
+  const startScreen = document.getElementById("startScreen");
+  const overScreen = document.getElementById("overScreen");
+
+  function start() {
+    reset();
+    state = "play";
+    startScreen.classList.add("hidden");
+    overScreen.classList.add("hidden");
+  }
+
+  function gameOver() {
+    state = "over";
+    const final = Math.floor(score);
+    const isBest = final > best;
+    if (isBest) { best = final; saveBest(best); }
+    document.getElementById("overText").innerHTML =
+      `Sabine und Bello haben <b>${Math.floor(distance / 50)} m</b> geschafft<br>und <b>${final} Punkte</b> gesammelt.`;
+    document.getElementById("bestText").textContent =
+      isBest ? "🏆 Neuer Rekord!" : "Rekord: " + best + " Punkte";
+    overScreen.classList.remove("hidden");
+  }
+
+  document.getElementById("startBtn").addEventListener("click", start);
+  document.getElementById("againBtn").addEventListener("click", start);
+  window.addEventListener("keydown", e => {
+    if ((e.key === "Enter" || e.key === " ") && state !== "play") start();
+  });
+
+  reset();
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    if (state === "play" && !paused) update(dt);
+    else if (state === "start") {
+      // Kleine Idle-Animation im Startbildschirm
+      time += dt; scroll += 60 * dt; sabine.step += dt * 5; bello.step += dt * 6;
+    }
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
