@@ -87,6 +87,7 @@
       <p>Sabine geht mit ihrem Hund <b>Bello</b> im Park spazieren.</p>
       <p>Weiche den anderen Hunden aus – weder Sabine noch Bello dürfen angerempelt werden!</p>
       <p>Sammle 🦴 Leckerlis für Extrapunkte. ❤️ bringen ein Leben zurück.</p>
+      <p>Nach 250 m wartet der Endgegner: <b>die Nachbarn mit den 3 Zäunen</b>. Sammle Kotbeutel, Sabine wirft sie als Beweis gegen die Zäune.</p>
       <p class="small">Handy: Finger irgendwo auflegen und ziehen – Sabine folgt der Bewegung.<br>Tastatur: Pfeiltasten / WASD, P = Pause</p>
       <button id="startBtn">Los geht's!</button>
     </div>
@@ -219,6 +220,10 @@
     paused = false;
     drag = null;
     touch = null;
+    boss = null;
+    nextBossAt = BOSS_FIRST_M;
+    bossCount = 0;
+    bossesBeaten = 0;
   }
 
   // ---------- Spawning ----------
@@ -271,10 +276,481 @@
     });
   }
 
+  // ---------- Endgegner: Die Nachbarn mit den 3 Zäunen ----------
+  // Kampfregeln (einfach gehalten):
+  //  - Jeder Zaun hat Zaun-Punkte (3, bei jedem weiteren Besuch +1).
+  //  - Im Garten-Vorplatz tauchen Kotbeutel auf. Sabine oder Bello sammeln sie ein,
+  //    Sabine wirft sie automatisch als "Beweis, dass sie immer aufräumt" gegen den vordersten Zaun.
+  //  - Jeder Treffer kostet den Zaun 1 Punkt. Fallen alle 3 Zäune, geben die Nachbarn auf.
+  //  - Die Nachbarn werfen Beschwerdebriefe, später Gartenzwerge und spritzen mit dem Gartenschlauch.
+  const BOSS_FIRST_M = 250, BOSS_EVERY_M = 450;
+  const FENCE_Y = [232, 202, 172];            // Zaun 1 (vorne), Zaun 2, Zaun 3 (hinten) – relativ zu boss.y
+  const FENCE_NAMES = ["Lattenzaun", "Jägerzaun", "Maschendrahtzaun"];
+  const NEIGHBOR_Y = 140;
+  const BOSS_MIN_Y = 290;                     // so weit darf Sabine im Kampf nach oben
+  const TAUNTS = [
+    "Ihr Hund hat schon WIEDER in unseren Garten gemacht!",
+    "Wir haben nicht umsonst DREI Zäune!",
+    "Das ist Privatgrund!",
+    "Wir rufen das Ordnungsamt!",
+    "Wir haben Fotos! … irgendwo.",
+    "Unser Rasen ist heilig!",
+    "Der Hund guckt schon wieder so komisch!",
+    "Wir sind sehr beleidigt!",
+    "Das kommt alles ins Protokoll!",
+  ];
+  const FENCE_HIT = ["Finger weg vom Zaun!", "Unverschämt!", "Das hat Konsequenzen!", "Wir sind zutiefst gekränkt!", "Das sagen wir der Hausverwaltung!"];
+  const SABINE_THROW = ["Beweis!", "Ich räum IMMER auf!", "Hier, Kotbeutel!", "Alles sauber!"];
+
+  let boss = null, nextBossAt = BOSS_FIRST_M, bossCount = 0, bossesBeaten = 0;
+
+  const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+  const frontFence = () => boss.fences.findIndex(f => f.hp > 0);
+
+  function startBoss() {
+    const hp = 3 + bossCount;
+    boss = {
+      phase: "intro", t: 0, y: -300, level: bossCount,
+      fences: FENCE_NAMES.map(name => ({ name, hp, max: hp, wobble: 0 })),
+      neighbors: [
+        { kind: "mann", x: W / 2 - 60, phase: 0, throwT: 2.5, mood: 0 },
+        { kind: "frau", x: W / 2 + 60, phase: 2, throwT: 3.6, mood: 0 },
+      ],
+      bags: [], shots: [], attacks: [], hoses: [],
+      bagTimer: 1.0, tauntTimer: 1.5, bubble: null,
+    };
+    bossCount++;
+    // Alle Hunde flüchten, Leckerlis verschwinden
+    for (const d of others) { d.mode = "cross"; d.vx = (d.x < W / 2 ? -1 : 1) * 260; d.vy = -30; d.owner = false; }
+    items = [];
+  }
+
+  function say(who, text, dur = 2.6) { boss.bubble = { who, text, t: dur }; }
+
+  function hurt(x, y, text) {
+    if (invuln > 0) return false;
+    lives--;
+    invuln = 1.6;
+    shake = 0.35;
+    burst(x, y, "#ffffff", 16);
+    floaters.push({ x, y: y - 30, text, life: 1, color: "#ff4d4d" });
+    if (lives <= 0) gameOver();
+    return true;
+  }
+
+  function hitsPlayer(x, y, r) {
+    if (dist2(x, y, sabine.x, sabine.y) < (r + sabine.r) ** 2) return "s";
+    if (dist2(x, y, bello.x, bello.y) < (r + bello.r) ** 2) return "b";
+    return null;
+  }
+
+  function updateBoss(dt) {
+    const b = boss;
+    b.t += dt;
+    if (b.bubble && (b.bubble.t -= dt) <= 0) b.bubble = null;
+    for (const f of b.fences) f.wobble = Math.max(0, f.wobble - dt * 3);
+    for (const n of b.neighbors) n.mood = Math.max(0, n.mood - dt);
+
+    if (b.phase === "intro") {
+      b.y += (0 - b.y) * Math.min(1, dt * 2.2);
+      if (b.t > 3.2) { b.phase = "fight"; b.t = 0; b.y = 0; say(0, TAUNTS[0]); }
+      return;
+    }
+    if (b.phase === "won") {
+      // Nachbarn treten zur Seite, dann verschwindet der Garten nach oben
+      b.neighbors.forEach((n, i) => { n.x += ((i ? W / 2 + 70 : W / 2 - 70) - n.x) * Math.min(1, dt * 3); });
+      if (b.t > 2.8) b.y -= 260 * dt;
+      if (b.y < -320) boss = null;
+      return;
+    }
+
+    // --- Kampf ---
+    const broken = b.fences.filter(f => f.hp <= 0).length;
+    const lvl = b.level;
+
+    // Nachbarn laufen im Garten hin und her
+    for (const n of b.neighbors) {
+      n.phase += dt * (0.9 + broken * 0.3);
+      n.x = W / 2 + Math.sin(n.phase) * 150 * (n.kind === "mann" ? 1 : -0.8);
+      n.throwT -= dt;
+      if (n.throwT <= 0) {
+        n.throwT = Math.max(0.9, rand(2.0, 3.0) - broken * 0.45 - lvl * 0.25);
+        n.mood = 0.6;
+        const ny = b.y + NEIGHBOR_Y;
+        const roll = Math.random();
+        if (n.kind === "mann" && (broken >= 2 || lvl > 0) && roll < 0.35) {
+          b.hoses.push({ x: clamp(sabine.x, PATH_L, PATH_R), warn: 1.0, beam: 0.7, from: n });
+        } else if (broken >= 1 && roll < 0.6) {
+          const a = Math.atan2(bello.y - ny, bello.x - n.x);
+          b.attacks.push({ type: "zwerg", x: n.x, y: ny, vx: Math.cos(a) * 170, vy: Math.sin(a) * 170, r: 13, rot: 0 });
+        } else {
+          const a = Math.atan2(sabine.y - ny, sabine.x - n.x) + rand(-0.15, 0.15);
+          const s = 210 + lvl * 25;
+          b.attacks.push({ type: "brief", x: n.x, y: ny, vx: Math.cos(a) * s, vy: Math.sin(a) * s, r: 10, rot: 0 });
+        }
+      }
+    }
+
+    // Sprüche
+    b.tauntTimer -= dt;
+    if (b.tauntTimer <= 0 && !b.bubble) { say(Math.random() < 0.5 ? 0 : 1, pick(TAUNTS)); b.tauntTimer = rand(2.5, 4); }
+
+    // Kotbeutel erscheinen auf dem Vorplatz
+    b.bagTimer -= dt;
+    if (b.bagTimer <= 0 && b.bags.length < 2) {
+      b.bags.push({ x: rand(PATH_L + 20, PATH_R - 20), y: rand(BOSS_MIN_Y + 30, H - 110), life: 7, bob: 0 });
+      b.bagTimer = rand(1.2, 2.0);
+    }
+    b.bags = b.bags.filter(bag => {
+      bag.life -= dt; bag.bob += dt * 5;
+      if (bag.life <= 0) return false;
+      if (hitsPlayer(bag.x, bag.y, 14)) {
+        b.shots.push({ x: sabine.x, y: sabine.y - 10, rot: 0 });
+        floaters.push({ x: sabine.x, y: sabine.y - 34, text: pick(SABINE_THROW), life: 1, color: "#b8f28b" });
+        burst(bag.x, bag.y, "#5fbf4a", 8);
+        return false;
+      }
+      return true;
+    });
+
+    // Sabines Würfe fliegen zum vordersten Zaun
+    b.shots = b.shots.filter(s => {
+      s.y -= 560 * dt; s.rot += dt * 12;
+      const fi = frontFence();
+      if (fi < 0) return false;
+      const fy = b.y + FENCE_Y[fi] + 10;
+      if (s.y <= fy) {
+        const f = b.fences[fi];
+        f.hp--; f.wobble = 1;
+        shake = Math.max(shake, 0.15);
+        burst(s.x, fy, "#c8a165", 10);
+        score += 50;
+        for (const n of b.neighbors) n.mood = 1.2;
+        if (f.hp <= 0) {
+          score += 250;
+          burst(s.x, fy, "#ffffff", 20);
+          floaters.push({ x: W / 2, y: fy + 40, text: `Zaun ${fi + 1} ist hinüber! +250`, life: 1.6, color: "#ffe066" });
+          say(fi % 2, fi < 2 ? "UNSER ZAUN!! Das war ein " + f.name + "!" : "Nicht der Maschendrahtzaun!!", 2.2);
+          if (b.fences.every(z => z.hp <= 0)) winBoss();
+        } else {
+          floaters.push({ x: s.x, y: fy + 26, text: "Treffer!", life: 0.7, color: "#fff" });
+          if (Math.random() < 0.5) say(Math.random() < 0.5 ? 0 : 1, pick(FENCE_HIT), 1.8);
+        }
+        return false;
+      }
+      return true;
+    });
+
+    // Angriffe der Nachbarn
+    b.attacks = b.attacks.filter(a => {
+      a.x += a.vx * dt; a.y += a.vy * dt; a.rot += dt * (a.type === "zwerg" ? 8 : 4);
+      if (a.y > H + 30 || a.x < -30 || a.x > W + 30) return false;
+      const who = hitsPlayer(a.x, a.y, a.r);
+      if (who && invuln <= 0) {
+        hurt(who === "b" ? bello.x : sabine.x, who === "b" ? bello.y : sabine.y,
+             a.type === "brief" ? "Beschwerde!" : "Gartenzwerg!");
+        return false;
+      }
+      return true;
+    });
+    b.hoses = b.hoses.filter(h => {
+      if (h.warn > 0) { h.warn -= dt; return true; }
+      h.beam -= dt;
+      if (Math.abs(sabine.x - h.x) < 18 + sabine.r) hurt(sabine.x, sabine.y, "Platsch!");
+      else if (Math.abs(bello.x - h.x) < 18 + bello.r) hurt(bello.x, bello.y, "Platsch!");
+      return h.beam > 0;
+    });
+  }
+
+  function winBoss() {
+    const b = boss;
+    b.phase = "won"; b.t = 0;
+    b.attacks = []; b.hoses = []; b.bags = []; b.shots = [];
+    bossesBeaten++;
+    const bonus = 1000 * (b.level + 1);
+    score += bonus;
+    lives = 3;
+    invuln = 1;
+    say(1, "Na gut … dann war's wohl doch die Katze von gegenüber.", 3.5);
+    floaters.push({ x: W / 2, y: H / 2, text: `Nachbarn besiegt! +${bonus}`, life: 2.5, color: "#ffe066" });
+    floaters.push({ x: W / 2, y: H / 2 + 30, text: "Alle Leben aufgefüllt ❤❤❤", life: 2.5, color: "#ff8fa3" });
+    nextBossAt = Math.floor(distance / 50) + BOSS_EVERY_M;
+  }
+
+  // --- Zeichnen des Endgegners ---
+  function drawFence(i, y, f) {
+    const wob = Math.sin(time * 40) * f.wobble * 3;
+    ctx.save();
+    ctx.translate(wob, 0);
+    if (f.hp <= 0) {
+      // umgefallene Reste
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = i === 0 ? "#e9e4d8" : i === 1 ? "#8a5a2b" : "#7c8c80";
+      for (let x = 10; x < W; x += 46) {
+        ctx.save(); ctx.translate(x, y + 16); ctx.rotate(((x * 7) % 5 - 2) * 0.3);
+        ctx.fillRect(-14, -2, 28, 4); ctx.restore();
+      }
+      ctx.restore();
+      return;
+    }
+    if (i === 0) {
+      // Zaun 1: weißer Lattenzaun
+      ctx.fillStyle = "#d8d2c4"; ctx.fillRect(0, y + 6, W, 4); ctx.fillRect(0, y + 15, W, 4);
+      ctx.fillStyle = "#fbf8f0"; ctx.strokeStyle = "#b5ad9c"; ctx.lineWidth = 1;
+      for (let x = 2; x < W; x += 14) {
+        ctx.beginPath(); ctx.moveTo(x, y + 24); ctx.lineTo(x, y + 4); ctx.lineTo(x + 4, y); ctx.lineTo(x + 8, y + 4); ctx.lineTo(x + 8, y + 24); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+      }
+    } else if (i === 1) {
+      // Zaun 2: Jägerzaun (gekreuzte Holzlatten)
+      ctx.strokeStyle = "#7a4c22"; ctx.lineWidth = 4;
+      for (let x = -20; x < W + 20; x += 24) {
+        ctx.beginPath(); ctx.moveTo(x, y + 2); ctx.lineTo(x + 24, y + 22); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x + 24, y + 2); ctx.lineTo(x, y + 22); ctx.stroke();
+      }
+      ctx.fillStyle = "#5e3a18";
+      for (let x = 0; x < W; x += 72) ctx.fillRect(x, y - 2, 6, 26);
+    } else {
+      // Zaun 3: Maschendrahtzaun
+      ctx.strokeStyle = "#9aa7a0"; ctx.lineWidth = 1.2;
+      for (let x = -24; x < W + 24; x += 9) {
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 22, y + 22); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x + 22, y); ctx.lineTo(x, y + 22); ctx.stroke();
+      }
+      ctx.fillStyle = "#56635b";
+      ctx.fillRect(0, y - 1, W, 3);
+      for (let x = 0; x < W; x += 80) ctx.fillRect(x, y - 3, 5, 27);
+    }
+    // Schild mit Nummer und Zaun-Punkten
+    const sx = i === 1 ? W - 118 : 18, sy = y + 2;
+    ctx.fillStyle = "#fff6d5"; ctx.strokeStyle = "#5c4320"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(sx, sy, 100, 20, 4); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#3a2a10"; ctx.font = "bold 12px Trebuchet MS, sans-serif";
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.fillText("ZAUN " + (i + 1), sx + 6, sy + 10.5);
+    for (let k = 0; k < f.max; k++) {
+      ctx.fillStyle = k < f.hp ? "#d6452f" : "#d8ccb0";
+      ctx.fillRect(sx + 56 + k * (38 / f.max), sy + 6, 38 / f.max - 2, 9);
+    }
+    ctx.restore();
+  }
+
+  function drawNeighbor(n, y) {
+    const angry = boss.phase !== "won";
+    const shout = n.mood > 0 || (boss.bubble && boss.neighbors[boss.bubble.who] === n);
+    const x = n.x;
+    ctx.save();
+    ctx.translate(x, y);
+    // Körper
+    ctx.fillStyle = n.kind === "mann" ? "#f2f2f2" : "#8e5ab8";
+    ctx.strokeStyle = "rgba(0,0,0,0.35)"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.roundRect(-13, 0, 26, 28, 7); ctx.fill(); ctx.stroke();
+    if (n.kind === "frau") { // Kittelschürze mit Punkten
+      ctx.fillStyle = "#f6d3ef";
+      for (const [px, py] of [[-6, 8], [5, 12], [-3, 20], [7, 22]]) { ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2); ctx.fill(); }
+    }
+    // Faust schütteln
+    const shake2 = angry ? Math.sin(time * 18) * 4 : 0;
+    ctx.strokeStyle = "#f0c19a"; ctx.lineWidth = 5; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(12, 6); ctx.lineTo(22, angry ? -10 + shake2 : 14); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-12, 6); ctx.lineTo(-18, 20); ctx.stroke();
+    ctx.fillStyle = "#f0c19a";
+    ctx.beginPath(); ctx.arc(22, angry ? -12 + shake2 : 15, 4.5, 0, Math.PI * 2); ctx.fill();
+    // Kopf
+    const red = angry ? (shout ? 1 : 0.5) : 0;
+    ctx.fillStyle = `rgb(${240}, ${Math.round(193 - red * 90)}, ${Math.round(154 - red * 90)})`;
+    ctx.beginPath(); ctx.arc(0, -10, 13, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    if (n.kind === "mann") {
+      // Glatze mit Haarkranz + Schnurrbart
+      ctx.fillStyle = "#777";
+      ctx.beginPath(); ctx.arc(-12, -9, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(12, -9, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#555"; ctx.beginPath(); ctx.ellipse(0, -4, 7, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+    } else {
+      // Lockenwickler
+      ctx.fillStyle = "#e7559b";
+      for (const [cx, cy] of [[-9, -20], [-3, -23], [3, -23], [9, -20]]) { ctx.beginPath(); ctx.roundRect(cx - 3, cy - 3, 6, 6, 2); ctx.fill(); }
+      ctx.fillStyle = "#a76d3c"; ctx.beginPath(); ctx.arc(-12, -12, 3.5, 0, Math.PI * 2); ctx.arc(12, -12, 3.5, 0, Math.PI * 2); ctx.fill();
+    }
+    // Gesicht
+    ctx.strokeStyle = "#222"; ctx.lineWidth = 2;
+    ctx.fillStyle = "#222";
+    ctx.beginPath(); ctx.arc(-5, -11, 1.6, 0, Math.PI * 2); ctx.arc(5, -11, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath();
+    if (angry) { ctx.moveTo(-9, -17); ctx.lineTo(-2, -14); ctx.moveTo(9, -17); ctx.lineTo(2, -14); }
+    else { ctx.moveTo(-9, -14); ctx.lineTo(-2, -16); ctx.moveTo(9, -14); ctx.lineTo(2, -16); }
+    ctx.stroke();
+    if (shout && angry) { ctx.fillStyle = "#5a1010"; ctx.beginPath(); ctx.ellipse(0, -1, 4, 3, 0, 0, Math.PI * 2); ctx.fill(); }
+    else { ctx.beginPath(); ctx.arc(0, angry ? 3 : -5, 4, angry ? Math.PI * 1.15 : Math.PI * 0.15, angry ? Math.PI * 1.85 : Math.PI * 0.85); ctx.stroke(); }
+    ctx.restore();
+    if (!angry) {
+      ctx.fillStyle = "#6fb7ff";
+      ctx.beginPath(); ctx.arc(x + 15, y - 22, 3, 0, Math.PI * 2); ctx.fill(); // Schweißtropfen
+    }
+  }
+
+  function drawBubble(text, x, y) {
+    ctx.font = "bold 14px Trebuchet MS, sans-serif";
+    const words = text.split(" "), lines = [];
+    let line = "";
+    for (const w of words) {
+      const test = line ? line + " " + w : w;
+      if (ctx.measureText(test).width > 210 && line) { lines.push(line); line = w; } else line = test;
+    }
+    lines.push(line);
+    const bw = Math.max(...lines.map(l => ctx.measureText(l).width)) + 20, bh = lines.length * 18 + 12;
+    const bx = clamp(x - bw / 2, 8, W - bw - 8), by = y - bh;
+    ctx.fillStyle = "#ffffff"; ctx.strokeStyle = "#222"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 10); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(clamp(x, bx + 14, bx + bw - 14) - 7, by + bh - 1); ctx.lineTo(x, by + bh + 12); ctx.lineTo(clamp(x, bx + 14, bx + bw - 14) + 7, by + bh - 1); ctx.fill();
+    ctx.fillStyle = "#b3261e"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+    lines.forEach((l, k) => ctx.fillText(l, bx + bw / 2, by + 7 + k * 18));
+  }
+
+  function drawBossScene() {
+    const b = boss, y0 = b.y;
+    // Gepflegter Rasen mit Mähstreifen
+    for (let k = 0; k < 10; k++) {
+      ctx.fillStyle = k % 2 ? "#79c25f" : "#86cc6b";
+      ctx.fillRect(0, y0 + 20 + k * 25, W, 25);
+    }
+    ctx.fillStyle = "rgba(0,0,0,0.12)"; ctx.fillRect(0, y0 + 268, W, 4);
+    // Haus
+    const hx = W / 2 - 110;
+    ctx.fillStyle = "#f1e2c2"; ctx.fillRect(hx, y0 + 78, 220, 40);
+    ctx.fillStyle = "#b5442f";
+    ctx.beginPath(); ctx.moveTo(hx - 12, y0 + 80); ctx.lineTo(W / 2, y0 + 22); ctx.lineTo(hx + 232, y0 + 80); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#9fd0ff";
+    for (const wx of [hx + 18, hx + 168]) { ctx.fillRect(wx, y0 + 86, 34, 22); ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.strokeRect(wx, y0 + 86, 34, 22); }
+    ctx.fillStyle = "#6b4423"; ctx.fillRect(W / 2 - 13, y0 + 92, 26, 26);
+    // Namensschild
+    ctx.fillStyle = "#fff6d5"; ctx.strokeStyle = "#5c4320"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(W / 2 - 62, y0 + 52, 124, 20, 4); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#3a2a10"; ctx.font = "bold 12px Trebuchet MS, sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("DIE NACHBARN", W / 2, y0 + 62.5);
+    // Gartenzwerge als Deko
+    for (const gx of [hx - 30, hx + 250]) drawGnome(gx, y0 + 112, 0);
+
+    for (const n of b.neighbors) drawNeighbor(n, y0 + NEIGHBOR_Y);
+    for (let i = 2; i >= 0; i--) drawFence(i, y0 + FENCE_Y[i], b.fences[i]);
+
+    // Verbotsschild am vordersten Zaun
+    if (b.fences[0].hp > 0) {
+      ctx.fillStyle = "#fff"; ctx.strokeStyle = "#d6452f"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.roundRect(W / 2 - 70, y0 + 252, 140, 30, 5); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#d6452f"; ctx.font = "bold 11px Trebuchet MS, sans-serif";
+      ctx.fillText("KEIN HUNDEKLO!", W / 2, y0 + 262);
+      ctx.fillText("Betreten verboten", W / 2, y0 + 274);
+    }
+  }
+
+  function drawGnome(x, y, rot) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+    ctx.fillStyle = "#2f6fd6"; ctx.fillRect(-6, 0, 12, 10);
+    ctx.fillStyle = "#f0c19a"; ctx.beginPath(); ctx.arc(0, -3, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.moveTo(-5, -1); ctx.lineTo(0, 8); ctx.lineTo(5, -1); ctx.fill();
+    ctx.fillStyle = "#d6452f"; ctx.beginPath(); ctx.moveTo(-6, -5); ctx.lineTo(0, -18); ctx.lineTo(6, -5); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBag(x, y, rot) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+    ctx.fillStyle = "#3fa34d"; ctx.strokeStyle = "#1f5e28"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.roundRect(-8, -6, 16, 14, 4); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-4, -6); ctx.lineTo(-6, -11); ctx.moveTo(4, -6); ctx.lineTo(6, -11); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawBossFront() {
+    const b = boss;
+    // Kotbeutel am Boden
+    for (const bag of b.bags) {
+      const blink = bag.life < 1.5 && Math.floor(bag.life * 8) % 2 === 0;
+      if (blink) continue;
+      ctx.strokeStyle = "rgba(255,255,255," + (0.5 + Math.sin(bag.bob) * 0.3) + ")"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(bag.x, bag.y, 18 + Math.sin(bag.bob) * 2, 0, Math.PI * 2); ctx.stroke();
+      drawBag(bag.x, bag.y + Math.sin(bag.bob) * 2, 0);
+    }
+    for (const s of b.shots) drawBag(s.x, s.y, s.rot);
+    // Gartenschlauch
+    for (const h of b.hoses) {
+      const top = b.y + FENCE_Y[0] + 20;
+      if (h.warn > 0) {
+        ctx.fillStyle = `rgba(80,160,255,${0.15 + 0.15 * Math.sin(time * 25)})`;
+        ctx.fillRect(h.x - 18, top, 36, H - top);
+        ctx.fillStyle = "#1d5fbf"; ctx.font = "bold 14px Trebuchet MS, sans-serif"; ctx.textAlign = "center";
+        ctx.fillText("Achtung, Schlauch!", h.x, top + 20);
+      } else {
+        ctx.fillStyle = "rgba(70,150,255,0.8)"; ctx.fillRect(h.x - 18, top, 36, H - top);
+        ctx.fillStyle = "rgba(255,255,255,0.7)";
+        for (let k = 0; k < 8; k++) ctx.fillRect(h.x - 12 + (k % 3) * 9, top + ((time * 600 + k * 90) % (H - top)), 3, 24);
+      }
+    }
+    // Würfe der Nachbarn
+    for (const a of b.attacks) {
+      if (a.type === "zwerg") { drawGnome(a.x, a.y, a.rot); continue; }
+      ctx.save(); ctx.translate(a.x, a.y); ctx.rotate(Math.sin(a.rot) * 0.4);
+      ctx.fillStyle = "#fff"; ctx.strokeStyle = "#444"; ctx.lineWidth = 1.5;
+      ctx.fillRect(-11, -7, 22, 14); ctx.strokeRect(-11, -7, 22, 14);
+      ctx.beginPath(); ctx.moveTo(-11, -7); ctx.lineTo(0, 1); ctx.lineTo(11, -7); ctx.stroke();
+      ctx.fillStyle = "#d6452f"; ctx.font = "bold 10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("!", 6, 3);
+      ctx.restore();
+    }
+    // Sprechblase
+    if (b.bubble) {
+      const n = b.neighbors[b.bubble.who];
+      drawBubble(b.bubble.text, n.x, b.y + NEIGHBOR_Y - 30);
+    }
+    // Intro-Banner
+    if (b.phase === "intro" && b.t > 0.3) {
+      const a = Math.min(1, (b.t - 0.3) * 3);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = "rgba(20,10,5,0.82)";
+      ctx.fillRect(0, H / 2 - 80, W, 170);
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "#ff6b4a"; ctx.font = "bold 34px Trebuchet MS, sans-serif";
+      ctx.fillText("ENDGEGNER!", W / 2, H / 2 - 48);
+      ctx.fillStyle = "#fff"; ctx.font = "bold 22px Trebuchet MS, sans-serif";
+      ctx.fillText("Die Nachbarn mit den 3 Zäunen", W / 2, H / 2 - 10);
+      ctx.font = "15px Trebuchet MS, sans-serif"; ctx.fillStyle = "#ffe9b0";
+      ctx.fillText("Sammle die grünen Kotbeutel – Sabine wirft sie", W / 2, H / 2 + 24);
+      ctx.fillText("als Beweis über die Zäune. Alle 3 Zäune müssen fallen!", W / 2, H / 2 + 46);
+      ctx.fillText("Weiche Briefen, Gartenzwergen und dem Schlauch aus.", W / 2, H / 2 + 68);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawBossBar() {
+    const b = boss;
+    if (b.phase === "won") return;
+    const y = H - 34;
+    ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(0, y - 6, W, 40);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 13px Trebuchet MS, sans-serif";
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.fillText("Die Nachbarn", 12, y + 4);
+    const total = b.fences.reduce((s, f) => s + f.max, 0), left = b.fences.reduce((s, f) => s + Math.max(0, f.hp), 0);
+    ctx.font = "12px Trebuchet MS, sans-serif"; ctx.fillStyle = "#ffd2c4";
+    ctx.fillText("Wut: " + left + " / " + total, 12, y + 20);
+    const segW = 80;
+    b.fences.forEach((f, i) => {
+      const sx = W - 12 - (3 - i) * (segW + 6);
+      ctx.fillStyle = "#3a2a20"; ctx.fillRect(sx, y + 4, segW, 16);
+      ctx.fillStyle = f.hp > 0 ? "#d6452f" : "#555";
+      ctx.fillRect(sx, y + 4, segW * Math.max(0, f.hp) / f.max, 16);
+      ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.font = "bold 11px Trebuchet MS, sans-serif";
+      ctx.fillText(f.hp > 0 ? "Zaun " + (i + 1) : "Zaun " + (i + 1) + " ✗", sx + segW / 2, y + 12.5);
+    });
+  }
+
   // ---------- Update ----------
   function update(dt) {
     time += dt;
-    speed = 140 + Math.min(time * 2.2, 160);
+    if (!boss && distance / 50 >= nextBossAt) startBoss();
+    const cruise = 140 + Math.min(time * 2.2, 160);
+    const targetSpeed = boss ? 0 : cruise;
+    speed += (targetSpeed - speed) * Math.min(1, dt * (targetSpeed ? 1.5 : 2.5));
     scroll += speed * dt;
     distance += speed * dt;
     score += speed * dt * 0.05;
@@ -295,6 +771,7 @@
     sabine.vy += (ay * maxV - sabine.vy) * Math.min(1, dt * 12);
     sabine.x = clamp(sabine.x + sabine.vx * dt, PATH_L - 30, PATH_R + 30);
     sabine.y = clamp(sabine.y + sabine.vy * dt, 140, H - 60);
+    if (boss && boss.phase !== "won" && sabine.y < BOSS_MIN_Y) sabine.y += (BOSS_MIN_Y - sabine.y) * Math.min(1, dt * 6);
     sabine.step += dt * (6 + Math.hypot(sabine.vx, sabine.vy) / 40);
 
     // Bello folgt an der Leine (Feder + max. Leinenlänge)
@@ -319,7 +796,7 @@
 
     // Gegner
     spawnTimer -= dt;
-    if (spawnTimer <= 0) {
+    if (spawnTimer <= 0 && !boss) {
       spawnDog();
       const minGap = Math.max(0.45, 1.3 - time * 0.012);
       spawnTimer = rand(minGap, minGap * 1.8);
@@ -351,7 +828,7 @@
 
     // Items
     itemTimer -= dt;
-    if (itemTimer <= 0) { spawnItem(); itemTimer = rand(1.5, 3.2); }
+    if (itemTimer <= 0 && !boss) { spawnItem(); itemTimer = rand(1.5, 3.2); }
     for (const it of items) { it.y += speed * dt; it.bob += dt * 4; }
     items = items.filter(it => {
       if (it.y > H + 30) return false;
@@ -380,21 +857,18 @@
         const hitS = dist2(d.x, d.y, sabine.x, sabine.y) < (dr + sabine.r) ** 2;
         const hitB = dist2(d.x, d.y, bello.x, bello.y) < (dr + bello.r) ** 2;
         if (hitS || hitB) {
-          lives--;
-          invuln = 1.6;
-          shake = 0.35;
           const hx = hitB ? bello.x : sabine.x, hy = hitB ? bello.y : sabine.y;
-          burst(hx, hy, "#ffffff", 16);
-          floaters.push({ x: hx, y: hy - 30, text: hitB ? "Grrr!" : "Autsch!", life: 1, color: "#ff4d4d" });
+          hurt(hx, hy, hitB ? "Grrr!" : "Autsch!");
           // Den Hund wegschubsen
           d.vx = (d.x < hx ? -1 : 1) * 220;
           d.vy = -60;
           d.mode = "cross";
-          if (lives <= 0) gameOver();
           break;
         }
       }
     }
+
+    if (boss && state === "play") updateBoss(dt);
 
     // Partikel & Texte
     for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 300 * dt; p.life -= dt; }
@@ -635,6 +1109,7 @@
     ctx.save();
     if (shake > 0) ctx.translate(rand(-5, 5) * shake * 3, rand(-5, 5) * shake * 3);
     drawPark();
+    if (boss) drawBossScene();
     drawItems();
 
     for (const d of others) if (d.owner && d.mode !== "cross") drawOwner(d);
@@ -673,6 +1148,8 @@
       ctx.restore();
     }
 
+    if (boss) drawBossFront();
+
     for (const p of particles) {
       ctx.globalAlpha = Math.max(0, p.life * 1.5);
       ctx.fillStyle = p.color;
@@ -692,7 +1169,7 @@
     ctx.globalAlpha = 1;
     ctx.restore();
 
-    if (state === "play") drawHUD();
+    if (state === "play") { drawHUD(); if (boss) drawBossBar(); }
     if (paused) {
       ctx.fillStyle = "rgba(0,0,0,0.45)";
       ctx.fillRect(0, 0, W, H);
@@ -719,10 +1196,13 @@
   function gameOver() {
     state = "over";
     const final = Math.floor(score);
+    const lostToBoss = boss && boss.phase !== "won";
     const isBest = final > best;
     if (isBest) { best = final; saveBest(best); }
     document.getElementById("overText").innerHTML =
-      `Sabine und Bello haben <b>${Math.floor(distance / 50)} m</b> geschafft<br>und <b>${final} Punkte</b> gesammelt.`;
+      `Sabine und Bello haben <b>${Math.floor(distance / 50)} m</b> geschafft<br>und <b>${final} Punkte</b> gesammelt.` +
+      (lostToBoss ? `<br><br>Die Nachbarn mit den 3 Zäunen haben gewonnen … diesmal.` : "") +
+      (bossesBeaten ? `<br><br>Nachbarn besiegt: <b>${bossesBeaten}×</b>` : "");
     document.getElementById("bestText").textContent =
       isBest ? "🏆 Neuer Rekord!" : "Rekord: " + best + " Punkte";
     overScreen.classList.remove("hidden");
