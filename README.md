@@ -15,7 +15,7 @@ und muss den anderen Hunden ausweichen.
 
 ## Endgegner: Die Nachbarn mit den 3 Zäunen
 
-Nach 250 m (danach alle 450 m) stehen die beleidigten Nachbarn hinter ihren drei Zäunen
+Nach 100 m (danach alle 450 m) stehen die beleidigten Nachbarn hinter ihren drei Zäunen
 (Zaun 1 Lattenzaun, Zaun 2 Jägerzaun, Zaun 3 Maschendrahtzaun) und behaupten, Bello würde
 in ihren Garten machen.
 
