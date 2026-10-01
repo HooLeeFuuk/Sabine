@@ -22,7 +22,10 @@
     touch-action: none;
     user-select: none;
     -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
   }
+  #wrap, canvas { touch-action: none; }
   #wrap {
     position: relative;
     width: 100vw;
@@ -84,7 +87,7 @@
       <p>Sabine geht mit ihrem Hund <b>Bello</b> im Park spazieren.</p>
       <p>Weiche den anderen Hunden aus – weder Sabine noch Bello dürfen angerempelt werden!</p>
       <p>Sammle 🦴 Leckerlis für Extrapunkte. ❤️ bringen ein Leben zurück.</p>
-      <p class="small">Steuerung: Pfeiltasten / WASD oder mit dem Finger ziehen.<br>P = Pause</p>
+      <p class="small">Handy: Finger irgendwo auflegen und ziehen – Sabine folgt der Bewegung.<br>Tastatur: Pfeiltasten / WASD, P = Pause</p>
       <button id="startBtn">Los geht's!</button>
     </div>
   </div>
@@ -141,19 +144,44 @@
     keys[e.key.toLowerCase()] = true;
     if (["arrowup","arrowdown","arrowleft","arrowright"," "].includes(e.key.toLowerCase())) e.preventDefault();
     if (e.key.toLowerCase() === "p" && state === "play") paused = !paused;
+    if (paused && e.key.toLowerCase() !== "p" && state === "play" && e.key.startsWith("Arrow")) paused = false;
   });
   window.addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
 
-  let touch = null; // {x,y} Zielposition in Spielkoordinaten
+  // Touch: relatives Ziehen wie auf einem Trackpad – der Finger kann überall
+  // auf dem Bildschirm liegen und verdeckt Sabine nicht.
+  let touch = null; // {x,y} Zielposition für Sabine in Spielkoordinaten
+  let drag = null;  // {id, px, py, sx, sy} Startpunkt des Fingers und von Sabine
+  const DRAG_GAIN = 1.4;
+  const wrapEl = document.getElementById("wrap");
   function toGame(e) {
     const r = canvas.getBoundingClientRect();
     return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale };
   }
-  canvas.addEventListener("pointerdown", e => { touch = toGame(e); canvas.setPointerCapture(e.pointerId); });
-  canvas.addEventListener("pointermove", e => { if (touch) touch = toGame(e); });
-  const endTouch = () => { touch = null; };
-  canvas.addEventListener("pointerup", endTouch);
-  canvas.addEventListener("pointercancel", endTouch);
+  wrapEl.addEventListener("pointerdown", e => {
+    if (state !== "play" || e.target.closest("button")) return;
+    const p = toGame(e);
+    if (p.y < 48 && p.x > W - 70) { paused = !paused; return; } // Pause-Knopf im HUD
+    if (paused) { paused = false; return; }
+    drag = { id: e.pointerId, px: p.x, py: p.y, sx: sabine.x, sy: sabine.y };
+    touch = { x: sabine.x, y: sabine.y };
+    try { wrapEl.setPointerCapture(e.pointerId); } catch {}
+    e.preventDefault();
+  });
+  wrapEl.addEventListener("pointermove", e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const p = toGame(e);
+    touch = { x: drag.sx + (p.x - drag.px) * DRAG_GAIN, y: drag.sy + (p.y - drag.py) * DRAG_GAIN };
+    // Wenn Sabine am Rand ansteht, den Bezugspunkt nachziehen, damit sie sofort zurückläuft
+    const cx = clamp(touch.x, PATH_L - 30, PATH_R + 30), cy = clamp(touch.y, 140, H - 60);
+    if (cx !== touch.x) { drag.px += (touch.x - cx) / DRAG_GAIN; touch.x = cx; }
+    if (cy !== touch.y) { drag.py += (touch.y - cy) / DRAG_GAIN; touch.y = cy; }
+    e.preventDefault();
+  });
+  const endTouch = e => { if (drag && e.pointerId === drag.id) { drag = null; touch = null; } };
+  wrapEl.addEventListener("pointerup", endTouch);
+  wrapEl.addEventListener("pointercancel", endTouch);
+  document.addEventListener("visibilitychange", () => { if (document.hidden && state === "play") paused = true; });
 
   // ---------- Spielzustand ----------
   let state = "start";
@@ -189,6 +217,8 @@
     time = 0;
     shake = 0;
     paused = false;
+    drag = null;
+    touch = null;
   }
 
   // ---------- Spawning ----------
@@ -257,9 +287,9 @@
     if (keys["arrowdown"] || keys["s"]) ay += 1;
     const maxV = 260;
     if (touch) {
-      const dx = touch.x - sabine.x, dy = (touch.y - 40) - sabine.y;
+      const dx = touch.x - sabine.x, dy = touch.y - sabine.y;
       const d = Math.hypot(dx, dy);
-      if (d > 4) { ax = dx / Math.max(d, 60); ay = dy / Math.max(d, 60); }
+      if (d > 2) { ax = dx / Math.max(d, 30); ay = dy / Math.max(d, 30); }
     } else if (ax && ay) { ax *= 0.7071; ay *= 0.7071; }
     sabine.vx += (ax * maxV - sabine.vx) * Math.min(1, dt * 12);
     sabine.vy += (ay * maxV - sabine.vy) * Math.min(1, dt * 12);
@@ -594,7 +624,11 @@
     ctx.font = "22px sans-serif";
     let hearts = "";
     for (let i = 0; i < 3; i++) hearts += i < lives ? "❤️" : "🤍";
-    ctx.fillText(hearts, W - 12, 26);
+    ctx.fillText(hearts, W - 66, 26);
+    // Pause-Knopf
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.fillRect(W - 44, 14, 7, 20);
+    ctx.fillRect(W - 31, 14, 7, 20);
   }
 
   function draw() {
@@ -666,6 +700,8 @@
       ctx.font = "bold 36px Trebuchet MS, sans-serif";
       ctx.textAlign = "center";
       ctx.fillText("Pause", W / 2, H / 2);
+      ctx.font = "18px Trebuchet MS, sans-serif";
+      ctx.fillText("Tippen oder P zum Weiterspielen", W / 2, H / 2 + 40);
     }
   }
 
