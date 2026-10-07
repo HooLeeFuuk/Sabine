@@ -28,18 +28,21 @@ in ihren Garten machen.
 
 ---
 
-# Rollbrett Underground (`skate/index.html`)
+# Rollbrett Underground 3D (`skate/index.html`)
 
-Ein 2D-Skate-Spiel im Stil der alten Street-Skate-Spiele: zwei Minuten Session auf einer Straße,
-Tricks zu Combos verketten und Ziele erfüllen.
+Ein 3D-Skate-Spiel im Stil der alten Street-Skate-Spiele (Three.js, eine einzige HTML-Datei).
+Zwei Minuten Session in einem Hafen-Skatepark mit Quarterpipes, Funbox, Treppe mit Handläufen,
+Kickern, Ledges, Rails und einem Mega-Kicker.
 
 - **Tricks:** Ollie, Flip-Tricks (Kickflip, Heelflip, Pop Shove-It, Varial Kickflip, 360 Flip),
   Grabs (Indy, Nosegrab, Tailgrab, Melon, Method), Grinds (50-50, Nosegrind, 5-0, Boardslide, Crooked),
-  Manual und Nose Manual.
+  Manual und Nose Manual, Drehungen in der Luft (Frontside/Backside 180, 360, 540 …).
+- **Quarterpipes:** schnell reinfahren für Vert-Airs; Sprung an der Kante gibt extra Höhe.
 - **Combos:** Punkte aller Tricks × Anzahl der Tricks. Mit Manual landen hält die Combo am Leben,
-  wiederholte Tricks bringen weniger Punkte. Bail = Combo weg.
+  wiederholte Tricks bringen weniger Punkte. Quer landen oder Flip nicht fertig = Bail.
 - **Spezial-Leiste:** füllt sich mit Tricks; wenn sie leuchtet, gehen Spezial-Tricks
   (Ghetto Bird, Darkslide, Casper) und die Balance ist leichter.
-- **Freak Out:** nach einem Bail Sprung hämmern für ein paar Trostpunkte.
-- **Ziele:** 10.000 und 30.000 Punkte, S-K-A-T-E sammeln, 5er-Combo, 3 s Grind, Kanal-Gap, geheimes Video-Tape.
-- **Steuerung:** Tastatur (Leertaste, J, L, I, O, Pfeile, P) oder Touch-Buttons am Handy (am besten quer).
+- **Freak Out:** nach einem Bail Sprung hämmern für Trostpunkte.
+- **Ziele:** 10.000 / 30.000 Punkte, S-K-A-T-E, 5er-Combo, 3 s Grind, 360er-Drehung, Treppen-Gap, geheimes Video-Tape.
+- **Steuerung:** Tastatur (Pfeile, Leertaste, J, L, I, O, P) oder am Handy (quer) virtueller Stick + Trick-Buttons.
+- Braucht beim Start Internet (Three.js und Schriften kommen vom CDN).
