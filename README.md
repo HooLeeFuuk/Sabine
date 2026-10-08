@@ -45,4 +45,9 @@ Kickern, Ledges, Rails und einem Mega-Kicker.
 - **Freak Out:** nach einem Bail Sprung hämmern für Trostpunkte.
 - **Ziele:** 10.000 / 30.000 Punkte, S-K-A-T-E, 5er-Combo, 3 s Grind, 360er-Drehung, Treppen-Gap, geheimes Video-Tape.
 - **Steuerung:** Tastatur (Pfeile, Leertaste, J, L, I, O, P) oder am Handy (quer) virtueller Stick + Trick-Buttons.
-- Braucht beim Start Internet (Three.js und Schriften kommen vom CDN).
+- **Grafik:** HDR-Rendering mit Bloom, filmischem Tonemapping und Vignette, physikalischer Himmel mit
+  Sonnenuntergang und Spiegelungen, prozedurale Beton-, Holz-, Metall- und Graffiti-Texturen mit Normalmaps,
+  Hafen mit Wasser, Kränen und Containerschiff, Neon-Schilder, Lichterketten, Staub- und Funkenpartikel.
+- **Sound:** synthetisierte Geräusche für Rollen, Ollie, Landung, Grind und Combos (M = Ton an/aus).
+- **Grafik-Schalter:** „Hoch“ oder „Schnell“ im Startmenü; die Auflösung passt sich automatisch an die Bildrate an.
+- Braucht beim Start Internet (Three.js, Zusatzmodule und Schriften kommen vom CDN).
